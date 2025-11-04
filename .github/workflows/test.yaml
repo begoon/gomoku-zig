@@ -1,0 +1,16 @@
+name: test
+on:
+    push:
+        branches: ["main"]
+    workflow_dispatch:
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+            - uses: extractions/setup-just@v3
+            - uses: mlugg/setup-zig@v2
+              with:
+                  version: 0.15.1
+            - run: >
+                  just test
