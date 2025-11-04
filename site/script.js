@@ -15,7 +15,7 @@ let winner = null;
 
 function update_thinking(on) {
     thinking = on;
-    $("#thinking").style.display = on ? "block" : "none";
+    $("#duration").textContent = on ? "thinking..." : "";
 }
 
 // worker RPC wiring
@@ -155,7 +155,7 @@ async function main() {
         console.log(msg);
 
         update_thinking(false);
-        $("#status").textContent += `| ${msg}`;
+        $("#duration").textContent = msg;
 
         await callWorker("place", { r, c, player: COMPUTER });
         await callWorker("print_board_at", { r, c });

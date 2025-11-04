@@ -1,6 +1,6 @@
 #board {
-    width: 600px;
-    height: 600px;
+    width: min(90vw, 600px);
+    aspect-ratio: 1 / 1;
     border: 1px solid black;
     display: grid;
     grid-template-columns: repeat(16, 1fr);
@@ -13,12 +13,7 @@ div.field {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 2em;
-}
-
-div.field:hover {
-    background-color: #e6cfa0;
-    cursor: pointer;
+    font-size: calc(min(90vw, 600px) / 16 * 0.8);
 }
 
 div.last-move {
@@ -26,7 +21,6 @@ div.last-move {
 }
 
 div.legend {
-    font-size: 14px;
     background-color: #ddd;
     display: flex;
     align-items: center;
@@ -34,19 +28,7 @@ div.legend {
 }
 
 #spacer {
-    font-size: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
-}
-
-#thinking {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    font-size: 20px;
-    display: none;
-    background-color: lightgray;
-    padding: 10px;
-    border-radius: 5px;
 }
