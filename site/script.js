@@ -56,6 +56,12 @@ worker.onmessage = (event) => {
             break;
         case "status":
             $("#status").textContent = msg.text;
+            const rc = msg.text.match(/\[(\d+)\s*:\s*(\d+)\]/);
+            if (rc) {
+                const r = Number(rc[1]);
+                const c = Number(rc[2]);
+                highlight_last_move({ r, c });
+            }
             break;
         default:
             // ignore

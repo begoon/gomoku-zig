@@ -491,49 +491,78 @@ pub const Game = struct {
             }
         }
 
-        // play center if first move
+        // 0. opening: play center
         if (self.stack_len == 0) {
             backing[0] = Move.at(@intCast(N / 2), @intCast(N / 2));
             return backing[0..1];
         }
 
-        // build candidates by scanning the neighborhood around each played move
-        // radius 1 (8-neighborhood) is typical; bump to 2 if you want a bit more breadth
-        const R: i32 = 1;
+        // tunables
+        const K: usize = 8; // last-K stones to expand around
+        const TARGET: usize = 28; // if we have fewer than this after R=1, add ring-2
+        const MAX_CANDIDATES: usize = 40; // cap the final candidate list by hotness
 
-        self.next_epoch(); // start fresh dedup epoch
+        self.next_epoch();
         var n: usize = 0;
 
-        var i: usize = 0;
-        while (i < self.stack_len) : (i += 1) {
-            const origin = self.move_stack[i];
+        // compute window [start_idx .. stack_len)
+        const start_stack_index: usize = if (self.stack_len > K) self.stack_len - K else 0;
 
-            var dr: i32 = -R;
-            while (dr <= R) : (dr += 1) {
-                var dc: i32 = -R;
-                while (dc <= R) : (dc += 1) {
-                    if (dr == 0 and dc == 0) continue;
-                    const v = Move.at(origin.r + dr, origin.c + dc);
-                    if (!v.in()) continue;
-                    if (!self.empty_at(v)) continue;
+        const ring1: [8]Move = .{
+            // corners
+            .{ .r = -1, .c = -1 }, .{ .r = -1, .c = 1 },
+            .{ .r = 1, .c = -1 },  .{ .r = 1, .c = 1 },
+            // axis
+            .{ .r = -1, .c = 0 },  .{ .r = 1, .c = 0 },
+            .{ .r = 0, .c = -1 },  .{ .r = 0, .c = 1 },
+        };
 
-                    // dedup across all origins
+        const ring2: [16]Move = .{
+            // axis
+            .{ .r = -2, .c = 0 },  .{ .r = 2, .c = 0 },
+            .{ .r = 0, .c = -2 },  .{ .r = 0, .c = 2 },
+            // corners
+            .{ .r = -2, .c = -2 }, .{ .r = -2, .c = 2 },
+            .{ .r = 2, .c = -2 },  .{ .r = 2, .c = 2 },
+            // “knight-band”
+            .{ .r = -2, .c = -1 }, .{ .r = -2, .c = 1 },
+            .{ .r = 2, .c = -1 },  .{ .r = 2, .c = 1 },
+            .{ .r = -1, .c = -2 }, .{ .r = 1, .c = -2 },
+            .{ .r = -1, .c = 2 },  .{ .r = 1, .c = 2 },
+        };
+
+        var ring_1_index: usize = start_stack_index;
+
+        while (ring_1_index < self.stack_len) : (ring_1_index += 1) {
+            const origin = self.move_stack[ring_1_index];
+            for (ring1) |offset| {
+                const v = Move.at(origin.r + offset.r, origin.c + offset.c);
+                if (!v.in() or !self.empty_at(v)) continue;
+                if (!self.mark_once(v)) continue;
+                backing[n] = v;
+                n += 1;
+            }
+        }
+
+        // 2. If still thin, add Chebyshev ring-2 around the same last-K origins (once).
+        if (n < TARGET) {
+            var ring_2_index: usize = start_stack_index;
+            while (ring_2_index < self.stack_len) : (ring_2_index += 1) {
+                const origin = self.move_stack[ring_2_index];
+                for (ring2) |off| {
+                    const v = Move.at(origin.r + off.r, origin.c + off.c);
+                    if (!v.in() or !self.empty_at(v)) continue;
                     if (!self.mark_once(v)) continue;
-
                     backing[n] = v;
                     n += 1;
                 }
             }
         }
 
-        comptime {
-            @setEvalBranchQuota(100_000);
-        }
-
-        // fallback: if somehow no candidates (almost-full board edge case), scan once.
+        // 3. Fallback for pathological near-full boards.
         if (n == 0) {
             inline for (0..N) |r| {
-                inline for (0..N) |c| {
+                for (0..N) |c| {
                     const m = Move.at(@intCast(r), @intCast(c));
                     if (self.empty_at(m)) {
                         backing[n] = m;
@@ -543,7 +572,89 @@ pub const Game = struct {
             }
         }
 
+        // 4. Soft cap by local_hotness: keep only the hottest ~MAX_CANDIDATES,
+        // but avoid fully reordering beyond the kept prefix.
+        if (n > MAX_CANDIDATES) {
+            var scores: [NN]u8 = undefined;
+
+            // 4.1 compute scores and track observed max
+            var max_hot: u8 = 0;
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const v = self.local_hotness(backing[i]);
+                scores[i] = v;
+                if (v > max_hot) max_hot = v;
+            }
+
+            // 4.2 build small histogram of hotness
+            // allow room for weighted hotness (for example, up to 32)
+            var histogram: [64]usize = [_]usize{0} ** 64;
+            i = 0;
+            while (i < n) : (i += 1) {
+                histogram[scores[i]] += 1;
+            }
+
+            // 4.3 find cutoff h* such that cumulative from top >= MAX_CANDIDATES
+            var need: usize = MAX_CANDIDATES;
+            var cutoff: u8 = 0;
+            var above_count: usize = 0;
+            var h: i32 = @intCast(max_hot);
+            while (h >= 0) : (h -= 1) {
+                const count = histogram[@intCast(h)];
+                if (count >= need) {
+                    cutoff = @intCast(h);
+                    above_count = MAX_CANDIDATES - need + count; // total of >= cutoff
+                    break;
+                }
+                need -= count;
+            }
+
+            // 4.4 stable-compact into the front:
+            // pass 1: strictly hotter than cutoff
+            var write: usize = 0;
+            i = 0;
+            while (i < n) : (i += 1) {
+                if (scores[i] > cutoff) {
+                    if (i != write) {
+                        swap(&backing[write], &backing[i]);
+                        swap_u8(&scores[write], &scores[i]);
+                    }
+                    write += 1;
+                }
+            }
+
+            // pass 2: equal to cutoff, until we reach MAX_CANDIDATES
+            i = 0;
+            while (write < MAX_CANDIDATES and i < n) : (i += 1) {
+                if (scores[i] == cutoff) {
+                    if (i != write) {
+                        swap(&backing[write], &backing[i]);
+                        swap_u8(&scores[write], &scores[i]);
+                    }
+                    write += 1;
+                }
+            }
+
+            // shrink to the kept prefix
+            n = MAX_CANDIDATES;
+        }
         return backing[0..n];
+    }
+
+    inline fn local_hotness(self: *const Game, m: Move) u8 {
+        var v: u8 = 0;
+        comptime {
+            @setEvalBranchQuota(100_000);
+        }
+        // count non-empty neighbors in the 8-neighborhood.
+        inline for ([_]i32{ -1, 0, 1 }) |dr| {
+            inline for ([_]i32{ -1, 0, 1 }) |dc| {
+                if (dr == 0 and dc == 0) continue;
+                const v = Move.at(m.r + dr, m.c + dc);
+                if (v.in() and !self.empty_at(v)) v +%= 1;
+            }
+        }
+        return v;
     }
 
     const TimerType = if (WASM) void else std.time.Timer;
@@ -573,7 +684,7 @@ pub const Game = struct {
         var best_value: i32 = if (player == .computer) -std.math.maxInt(i32) else std.math.maxInt(i32);
 
         for (moves, 1..) |move, i| {
-            progress(i, moves.len, &self.counters);
+            progress(i, moves.len, move, self);
 
             self.place(move, player);
 
@@ -941,16 +1052,21 @@ pub fn output(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-pub fn progress(i: usize, n: usize, stats: *const Stats) void {
+pub fn progress(i: usize, n: usize, move: Move, game: *const Game) void {
     if (builtin.is_test) {
         return;
     }
+
+    game.print_board_at(move);
+
     const crlf = if (i == n) "\n" else "\r";
     const percent: f64 = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n)) * 100.0;
 
     var buffer: [1024]u8 = undefined;
-    const fmt = "{any: <.2}% ({any}/{any}) ({d}) {s}";
-    const args = .{ percent, i, n, stats.analyzed_moves, crlf };
+    const fmt = "{any: <.2}% ({any}/{any}) ({d}) [{d} : {d}] {s}";
+
+    const stats = game.counters;
+    const args = .{ percent, i, n, stats.analyzed_moves, move.r, move.c, crlf };
 
     const v = std.fmt.bufPrint(&buffer, fmt, args) catch return;
     output("{s}", .{v});
@@ -958,4 +1074,18 @@ pub fn progress(i: usize, n: usize, stats: *const Stats) void {
     if (WASM) {
         status(v.ptr, v.len);
     }
+}
+
+// Partial selection: keep the top MAX_CANDIDATES by hotness (descending).
+// Simple O(n * MAX_CANDIDATES) scheme is fine at these sizes.
+inline fn swap(a: *Move, b: *Move) void {
+    const tmp = a.*;
+    a.* = b.*;
+    b.* = tmp;
+}
+
+inline fn swap_u8(a: *u8, b: *u8) void {
+    const t = a.*;
+    a.* = b.*;
+    b.* = t;
 }

@@ -30,10 +30,10 @@ test "available moves" {
     try testing.expectEqual(7, moves[0].c);
 
     game.place(moves[0], .human);
-    try testing.expectEqual(8, game.available_moves(&backing).len);
+    try testing.expectEqual(24, game.available_moves(&backing).len);
 
     game.place(Move.at(7, 8), .computer);
-    try testing.expectEqual(10, game.available_moves(&backing).len);
+    try testing.expectEqual(28, game.available_moves(&backing).len);
 }
 
 test "check pattern" {
