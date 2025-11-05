@@ -73,8 +73,7 @@ worker.onmessage = (event) => {
 
 function store_move(move, player) {
     moves.push({ move, player });
-    const colors = ["green", "blue"];
-    $$("#moves").textContent = moves
+    $("#moves").textContent = moves
         .map(
             ({ move, player }, index) =>
                 `${index + 1}. ${PLAYER_NAMES[player]}:${String.fromCharCode(64 + move.c + 1)}${move.r + 1}`
