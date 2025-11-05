@@ -13,6 +13,8 @@ let thinking = false;
 let last_move = { r: -1, c: -1 };
 let winner = null;
 
+let moves = [];
+
 function update_thinking(on) {
     thinking = on;
     $("#duration").textContent = on ? "thinking..." : "";
@@ -68,6 +70,18 @@ worker.onmessage = (event) => {
             break;
     }
 };
+
+function store_move(move, player) {
+    moves.push({ move, player });
+    const colors = ["green", "blue"];
+    const moves = $$("#moves");
+    moves.textContent = moves
+        .map(
+            ({ move, player }, index) =>
+                `${index + 1}. ${PLAYER_NAMES[player]}:${String.fromCharCode(64 + move.c + 1)}${move.r + 1}`
+        )
+        .join(", ");
+}
 
 function highlight_last_move(move) {
     const fields = $$(".field");
@@ -140,6 +154,8 @@ async function main() {
         await callWorker("place", { r: row, c: col, player: HUMAN });
         await callWorker("print_board_at", { r: row, c: col });
 
+        store_move({ r: row, c: col }, HUMAN);
+
         highlight_last_move({ r: row, c: col });
 
         if (await have_winner()) return;
@@ -165,6 +181,8 @@ async function main() {
 
         await callWorker("place", { r, c, player: COMPUTER });
         await callWorker("print_board_at", { r, c });
+
+        store_move({ r, c }, COMPUTER);
 
         BOARD[r][c] = PLAYER_NAMES[COMPUTER];
         for (const field of $$(".field")) {
