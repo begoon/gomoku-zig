@@ -641,8 +641,8 @@ pub const Game = struct {
         return backing[0..n];
     }
 
-    inline fn local_hotness(self: *const Game, m: Move) u8 {
-        var v: u8 = 0;
+    inline fn local_hotness(self: *const Game, move: Move) u8 {
+        var sum: u8 = 0;
         comptime {
             @setEvalBranchQuota(100_000);
         }
@@ -650,11 +650,11 @@ pub const Game = struct {
         inline for ([_]i32{ -1, 0, 1 }) |dr| {
             inline for ([_]i32{ -1, 0, 1 }) |dc| {
                 if (dr == 0 and dc == 0) continue;
-                const v = Move.at(m.r + dr, m.c + dc);
-                if (v.in() and !self.empty_at(v)) v +%= 1;
+                const v = Move.at(move.r + dr, move.c + dc);
+                if (v.in() and !self.empty_at(v)) sum +%= 1;
             }
         }
-        return v;
+        return sum;
     }
 
     const TimerType = if (WASM) void else std.time.Timer;
