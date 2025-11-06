@@ -2,7 +2,7 @@ run:
     zig run -O ReleaseFast gomoku.zig
 
 test:
-    zig test gomoku_test.zig
+    zig test -O ReleaseSafe gomoku_test.zig
 
 serve:
 	python3 -m http.server -d site 8000

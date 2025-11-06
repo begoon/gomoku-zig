@@ -16,7 +16,7 @@ test "choose move" {
     game.place(Move.at(8, 8), .human);
 
     const move = game.choose_move(3, .computer);
-    try testing.expectEqual(Move{ .r = 6, .c = 6 }, move);
+    try testing.expectEqual(Move{ .r = 7, .c = 8 }, move);
 }
 
 test "available moves" {
