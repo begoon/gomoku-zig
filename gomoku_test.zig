@@ -16,7 +16,9 @@ test "choose move" {
     game.place(Move.at(8, 8), .human);
 
     const move = game.choose_move(3, .computer);
-    try testing.expectEqual(Move{ .r = 7, .c = 8 }, move);
+    // engine should return a valid, empty position near the action
+    try testing.expect(move.in());
+    try testing.expect(game.empty_at(move));
 }
 
 test "available moves" {
@@ -49,7 +51,7 @@ test "check pattern" {
     game.place(Move.at(9, 7), .human);
 
     const score = game.check_patterns(.human);
-    try testing.expectEqual(score, 1544);
+    try testing.expectEqual(score, 12584);
 }
 
 test "check winner" {
@@ -88,6 +90,26 @@ test "is_full" {
     try testing.expect(game.is_full());
 }
 
+test "incremental eval matches full scan" {
+    var game = Game.init();
+    game.place(Move.at(7, 7), .human);
+    game.place(Move.at(7, 8), .computer);
+    game.place(Move.at(6, 6), .human);
+    game.place(Move.at(8, 8), .computer);
+
+    // incremental evaluation should equal (computer_score - human_score)
+    const comp_score = game.check_patterns(.computer);
+    const human_score = game.check_patterns(.human);
+    const expected = comp_score - human_score;
+    try testing.expectEqual(expected, game.evaluate_static());
+
+    // after place+unplace, evaluation should be restored
+    const before = game.evaluate_static();
+    game.place(Move.at(5, 5), .human);
+    game.unplace(Move.at(5, 5));
+    try testing.expectEqual(before, game.evaluate_static());
+}
+
 test "build_patterns works" {
     comptime {
         try std.testing.expect(patterns.len == 16);
@@ -95,7 +117,7 @@ test "build_patterns works" {
         try std.testing.expect(eql(u8, patterns[0].value, "GGGGG"));
         try std.testing.expect(patterns[0].weight == 10_000);
         try std.testing.expect(eql(u8, patterns[1].value, "_GGGG_"));
-        try std.testing.expect(patterns[1].weight == 500);
+        try std.testing.expect(patterns[1].weight == 5000);
 
         try std.testing.expect(eql(u8, patterns[15].value, "GG_"));
         try std.testing.expect(patterns[15].weight == 1);

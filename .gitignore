@@ -1,2 +1,3 @@
 *.wasm
 !site/wasm.wasm
+.claude/settings.local.json
