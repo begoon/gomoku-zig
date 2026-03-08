@@ -18,7 +18,7 @@ const MAX_DEPTH: usize = DEPTH + QDEPTH + 2; // max plies for killer table
 pub const N: i32 = 15;
 pub const NN: usize = N * N;
 
-// keep evaluation sensitive to shortest scored pattern (currently 3..6)
+// Keep evaluation sensitive to shortest scored pattern (currently 3..6).
 const MIN_EVAL_PATTERN_LEN: usize = 3;
 
 pub const Field = enum {
@@ -434,7 +434,7 @@ pub const Game = struct {
         self.evaluation = self.totals[player_index(.computer)] - self.totals[player_index(.human)];
     }
 
-    // batch scanner: useful for validation or profiling
+    // Batch scanner: useful for validation or profiling.
     pub fn check_patterns(self: *Game, player: Field) i32 {
         self.counters.check_patterns_calls += 1;
 
@@ -508,7 +508,7 @@ pub const Game = struct {
         self.next_epoch();
         var n: usize = 0;
 
-        // use ALL stones for ring-1 to avoid missing blocking moves near older stones
+        // Use ALL stones for ring-1 to avoid missing blocking moves near older stones.
         const start_stack_index: usize = 0;
 
         const ring1: [8]Move = .{
@@ -657,8 +657,8 @@ pub const Game = struct {
         return backing[0..n];
     }
 
-    /// Scan all stones for runs of 3+ in each direction.
-    /// Add the open endpoints to the candidate list if not already present.
+    // Scan all stones for runs of 3+ in each direction.
+    // Add the open endpoints to the candidate list if not already present.
     fn add_threat_moves(self: *Game, backing: *[NN]Move, n: *usize) void {
         for (0..self.stack_len) |si| {
             const stone = self.move_stack[si];
@@ -744,7 +744,7 @@ pub const Game = struct {
         self.killers[d][0] = move;
     }
 
-    /// Promote killer moves to the front of the move list (if present and legal).
+    // Promote killer moves to the front of the move list (if present and legal).
     fn promote_killers(self: *Game, moves: []Move, depth: i32) void {
         const d: usize = @intCast(@min(@as(i32, @intCast(MAX_DEPTH - 1)), depth));
         var write: usize = 0;
@@ -843,7 +843,7 @@ pub const Game = struct {
         return best_move.?;
     }
 
-    /// Check if player has a four (can win next move) by checking all candidate positions.
+    // Check if player has a four (can win next move) by checking all candidate positions.
     fn find_winning_move(self: *Game, moves: []const Move, player: Field) ?Move {
         for (moves) |move| {
             self.place(move, player);
@@ -854,7 +854,7 @@ pub const Game = struct {
         return null;
     }
 
-    /// Filter moves to only those that block the opponent's winning move(s) + own wins.
+    // Filter moves to only those that block the opponent's winning move(s) + own wins.
     fn get_forced_moves(self: *Game, all_moves: []Move, forced_backing: *[NN]Move, player: Field) []Move {
         const opponent: Field = if (player == .computer) .human else .computer;
         var n: usize = 0;
@@ -914,7 +914,7 @@ pub const Game = struct {
         var forced_backing: [NN]Move = undefined;
         const forced = self.get_forced_moves(all_moves, &forced_backing, player);
 
-        // If there are forced moves (opponent has a four), only search those
+        // If there are forced moves (opponent has a four), only search those.
         const moves = if (forced.len > 0) forced else all_moves;
 
         // order moves by immediate win or by delta to improve pruning
@@ -946,7 +946,7 @@ pub const Game = struct {
         return if (player == .computer) alpha else beta;
     }
 
-    /// Larger is better for .computer, smaller for .human
+    // Larger is better for .computer, smaller for .human
     fn move_delta(self: *Game, mv: Move, player: Field) i32 {
         const before = self.evaluate_static();
         self.place(mv, player);
@@ -955,8 +955,8 @@ pub const Game = struct {
         return after - before;
     }
 
-    /// Returns true if this move is "tactical": wins now, blocks an immediate win,
-    /// or swings eval by a large amount (forcing moves / big threats).
+    // Returns true if this move is "tactical": wins now, blocks an immediate win,
+    // or swings eval by a large amount (forcing moves / big threats).
     fn is_tactical(self: *Game, move: Move, player: Field) bool {
         // 1. our immediate win?
         self.place(move, player);
@@ -976,8 +976,8 @@ pub const Game = struct {
         return @abs(delta) >= QUIET_THRESHOLD;
     }
 
-    /// Orders `moves` in-place: best-first for the side to move.
-    /// Uses evaluation delta (one place/unplace per move).
+    // Orders `moves` in-place: best-first for the side to move.
+    // Uses evaluation delta (one place/unplace per move).
     fn order_moves(self: *Game, moves: []Move, player: Field) void {
         if (moves.len <= 1) return;
 
