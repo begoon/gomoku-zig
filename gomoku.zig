@@ -5,6 +5,9 @@ const builtin = @import("builtin");
 
 const WASM = builtin.target.cpu.arch == .wasm32;
 
+// The native console and profiling clocks use synchronous I/O.
+const io = if (WASM) {} else std.Io.Threaded.global_single_threaded.io();
+
 extern fn console(msg: [*]const u8, len: usize) void;
 extern fn status(msg: [*]const u8, len: usize) void;
 extern fn enter() void;
@@ -297,11 +300,11 @@ pub const Game = struct {
 
         var start_time: TimerType = undefined;
         if (!WASM) {
-            start_time = TimerType.start() catch @panic("check_pattern: timer start failed");
+            start_time = std.Io.Clock.awake.now(io);
         }
         defer {
             if (!WASM) {
-                const elapsed = start_time.read();
+                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.check_pattern_time_ns += elapsed;
                 self.counters.check_pattern_time_avg_ns = (self.counters.check_pattern_time_avg_ns + elapsed) / 2;
             }
@@ -440,11 +443,11 @@ pub const Game = struct {
 
         var start_time: TimerType = undefined;
         if (!WASM) {
-            start_time = TimerType.start() catch @panic("check_patterns: timer start failed");
+            start_time = std.Io.Clock.awake.now(io);
         }
         defer {
             if (!WASM) {
-                const elapsed = start_time.read();
+                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.check_patterns_time_ns += elapsed;
                 self.counters.check_patterns_time_avg_ns = (self.counters.check_patterns_time_avg_ns + elapsed) / 2;
             }
@@ -485,11 +488,11 @@ pub const Game = struct {
 
         var start_time: TimerType = undefined;
         if (!WASM) {
-            start_time = TimerType.start() catch @panic("available_moves: timer start failed");
+            start_time = std.Io.Clock.awake.now(io);
         }
         defer {
             if (!WASM) {
-                const elapsed = start_time.read();
+                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.available_moves_time_ns += elapsed;
                 self.counters.available_moves_time_avg_ns = (self.counters.available_moves_time_avg_ns + elapsed) / 2;
             }
@@ -726,7 +729,7 @@ pub const Game = struct {
         return sum;
     }
 
-    const TimerType = if (WASM) void else std.time.Timer;
+    const TimerType = if (WASM) void else std.Io.Timestamp;
 
     fn clear_killers(self: *Game) void {
         for (&self.killers) |*slot| {
@@ -771,11 +774,11 @@ pub const Game = struct {
 
         var start_time: TimerType = undefined;
         if (!WASM) {
-            start_time = TimerType.start() catch @panic("choose_move: timer start failed");
+            start_time = std.Io.Clock.awake.now(io);
         }
         defer {
             if (!WASM) {
-                const elapsed = start_time.read();
+                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.choose_move_time_ns = elapsed;
             }
         }
@@ -1028,11 +1031,11 @@ pub const Game = struct {
 
         var start_time: TimerType = undefined;
         if (!WASM) {
-            start_time = TimerType.start() catch @panic("quiescence: timer start failed");
+            start_time = std.Io.Clock.awake.now(io);
         }
         defer {
             if (!WASM) {
-                const elapsed = start_time.read();
+                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.quiescence_time_ns += elapsed;
                 self.counters.quiescence_time_avg_ns = (self.counters.quiescence_time_avg_ns + elapsed) / 2;
             }
@@ -1219,7 +1222,7 @@ pub fn wait_enter() !void {
     output("press enter to continue...\n", .{});
 
     var in_buf: [64]u8 = undefined;
-    var in_reader = std.fs.File.stdin().readerStreaming(&in_buf);
+    var in_reader = std.Io.File.stdin().readerStreaming(io, &in_buf);
     const input = &in_reader.interface;
     while (true) {
         const b = input.takeByte() catch |err| switch (err) {
