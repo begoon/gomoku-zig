@@ -15,7 +15,7 @@ jobs:
             - run: just test
             - run: zig build-exe -O ReleaseFast gomoku.zig
             - run: just wasm-build js-build
-            - uses: actions/setup-node@v4
+            - uses: oven-sh/setup-bun@v2
               with:
-                  node-version: 22
-            - run: node scripts/wasm-smoke.mjs
+                  bun-version: latest
+            - run: bun scripts/wasm-smoke.ts

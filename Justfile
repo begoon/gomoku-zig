@@ -41,7 +41,7 @@ js-run:
     bun index.js
 
 wasm-test: js-build
-    node scripts/wasm-smoke.mjs
+    bun scripts/wasm-smoke.ts
 
 # Compare against a saved older site/wasm.wasm with equal thinking budgets.
 benchmark baseline milliseconds="100" pairs="2":

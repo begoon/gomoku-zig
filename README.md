@@ -14,7 +14,7 @@ just run         # Console game
 just wasm-build  # Standalone WASM game (bun gomoku.js)
 just js-build    # Build site/wasm.wasm for the browser
 just serve       # Open http://localhost:8000
-just wasm-test   # Rebuild and test the WASM API (requires Node.js)
+just wasm-test   # Rebuild and test the WASM API (requires Bun)
 ```
 
 The committed `site/wasm.wasm` is the browser deployment artifact. Rebuild it after changing Zig sources. WASM hosts must provide `env.now_ms` using a monotonic clock such as `performance.now()`, alongside the existing console/status callbacks. Builds reserve a 2 MiB stack for search and game state.
