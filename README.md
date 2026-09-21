@@ -2,7 +2,7 @@
 
 A Gomoku player implemented in Zig 0.16.0 for the console and WASM/JavaScript. Five or more contiguous stones win (freestyle rules).
 
-The engine uses iterative-deepening alpha-beta search, threat-aware move selection, a Zobrist transposition table, incremental evaluation with cached undo, and forced-response quiescence. A bounded continuous-four solver looks for provable forcing attacks. The browser offers 0.25, 1, and 3 second thinking budgets; the console uses 1 second.
+The engine uses iterative-deepening alpha-beta search, threat-aware move selection, a Zobrist transposition table, incremental evaluation with cached undo, and forced-response quiescence. A bounded continuous-four solver looks for provable forcing attacks. The browser offers 0.25, 1, 3, 10, and 30 second thinking budgets, defaulting to 30 seconds with a countdown while thinking; the console uses 1 second.
 
 WASM version runs [online](https://demin.ws/gomoku-zig/) from GitHub pages.
 

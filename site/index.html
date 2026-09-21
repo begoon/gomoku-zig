@@ -11,9 +11,18 @@
         <select id="difficulty">
             <option value="250">Quick (0.25 seconds)</option>
             <option value="1000">Normal (1 second)</option>
-            <option value="3000" selected>Deep (3 seconds)</option>
+            <option value="3000">Deep (3 seconds)</option>
+            <option value="10000">Extended (10 seconds)</option>
+            <option value="30000" selected>Long (30 seconds)</option>
         </select>
         <div id="board" class="board"></div>
+        <div id="countdown" hidden>
+            <div class="countdown-heading">
+                <span>Computer thinking</span>
+                <span id="countdown-label" role="timer"></span>
+            </div>
+            <progress id="countdown-bar" max="1" value="1" aria-label="Thinking time remaining"></progress>
+        </div>
         <div id="status"></div>
         <div id="duration"></div>
         <div id="moves"></div>

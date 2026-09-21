@@ -14,6 +14,34 @@ let last_move = { r: -1, c: -1 };
 let winner = null;
 
 let moves = [];
+let countdownInterval = null;
+
+function stop_countdown() {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+    $("#countdown").hidden = true;
+    $("#countdown-label").textContent = "";
+    $("#countdown-bar").value = 0;
+}
+
+function start_countdown(time_ms) {
+    stop_countdown();
+    const deadline = performance.now() + time_ms;
+    const timer = $("#countdown");
+    timer.hidden = false;
+    const update = () => {
+        const remaining = Math.max(0, deadline - performance.now());
+        const label = remaining > 0
+            ? `${(Math.ceil(remaining / 100) / 10).toFixed(1)} s remaining`
+            : "Finishing move…";
+        $("#countdown-label").textContent = label;
+        const bar = $("#countdown-bar");
+        bar.value = Math.min(1, remaining / time_ms);
+        bar.setAttribute("aria-valuetext", label);
+    };
+    update();
+    countdownInterval = setInterval(update, 100);
+}
 
 function update_thinking(on) {
     thinking = on;
@@ -177,7 +205,9 @@ async function main() {
             // ask worker to compute best move (heavy)
             const start = performance.now();
             const time_ms = Number($("#difficulty").value);
+            start_countdown(time_ms);
             const { move, depth, nodes } = await callWorker("choose_move", { time_ms, player: COMPUTER });
+            stop_countdown();
             console.log(`Search completed depth ${depth}, ${nodes} nodes`);
             if (move < 0) {
                 winner = "draw";
@@ -213,6 +243,7 @@ async function main() {
             $("#status").textContent = "The move could not be completed. Reload to start a new game.";
             winner = "error";
         } finally {
+            stop_countdown();
             update_thinking(false);
         }
     });
