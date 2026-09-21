@@ -4,6 +4,7 @@ const url = fileURLToPath(new URL("./gomoku.wasm", import.meta.url));
 console.log("loading wasm from:", url);
 const { instance } = await WebAssembly.instantiateStreaming(fetch("file://" + url), {
     env: {
+        now_ms: () => performance.now(),
         console: (ptr, len) => {
             const memory = instance.exports.memory;
             const bytes = new Uint8Array(memory.buffer, ptr, len);

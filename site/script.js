@@ -17,7 +17,13 @@ let moves = [];
 
 function update_thinking(on) {
     thinking = on;
-    $("#duration").textContent = on ? "thinking..." : "";
+    $("#difficulty").disabled = on;
+    if (on) {
+        $("#duration").textContent = "thinking...";
+        $("#status").textContent = "";
+    } else if ($("#duration").textContent === "thinking...") {
+        $("#duration").textContent = "";
+    }
 }
 
 // worker RPC wiring
@@ -99,6 +105,11 @@ async function have_winner() {
         winner = v;
         return v;
     }
+    if (moves.length === N * N) {
+        winner = "draw";
+        $("#status").textContent = "Game over: draw";
+        return true;
+    }
     return 0;
 }
 
@@ -145,53 +156,65 @@ async function main() {
         const col = Number(target.dataset.col);
         if (BOARD[row][col] !== ".") return;
 
-        // Human move
-        BOARD[row][col] = PLAYER_NAMES[HUMAN];
-        target.textContent = PLAYER_NAMES[HUMAN];
-
-        await callWorker("place", { r: row, c: col, player: HUMAN });
-        await callWorker("print_board_at", { r: row, c: col });
-
-        store_move({ r: row, c: col }, HUMAN);
-
-        highlight_last_move({ r: row, c: col });
-
-        if (await have_winner()) return;
-
-        // computer thinking
         update_thinking(true);
+        try {
+            // Human move
+            BOARD[row][col] = PLAYER_NAMES[HUMAN];
+            target.textContent = PLAYER_NAMES[HUMAN];
 
-        // let UI show spinner right away (no heavy work on main now, but this helps)
-        await new Promise((r) => setTimeout(r, 0));
+            await callWorker("place", { r: row, c: col, player: HUMAN });
+            await callWorker("print_board_at", { r: row, c: col });
 
-        // ask worker to compute best move (heavy)
-        const start = performance.now();
-        const move = await callWorker("choose_move", { depth: 5, player: COMPUTER });
-        const end = performance.now();
+            store_move({ r: row, c: col }, HUMAN);
 
-        const r = (move >> 8) & 0xff;
-        const c = move & 0xff;
-        const msg = `computer move (${String.fromCharCode(65 + c)}${r + 1}) in ${(end - start).toFixed(2)} ms`;
-        console.log(msg);
+            highlight_last_move({ r: row, c: col });
 
-        update_thinking(false);
-        $("#duration").textContent = msg;
+            if (await have_winner()) return;
 
-        await callWorker("place", { r, c, player: COMPUTER });
-        await callWorker("print_board_at", { r, c });
+            // let UI show spinner right away (no heavy work on main now, but this helps)
+            await new Promise((r) => setTimeout(r, 0));
 
-        store_move({ r, c }, COMPUTER);
-
-        BOARD[r][c] = PLAYER_NAMES[COMPUTER];
-        for (const field of $$(".field")) {
-            if (Number(field.dataset.row) === r && Number(field.dataset.col) === c) {
-                field.textContent = PLAYER_NAMES[COMPUTER];
-                break;
+            // ask worker to compute best move (heavy)
+            const start = performance.now();
+            const time_ms = Number($("#difficulty").value);
+            const { move, depth, nodes } = await callWorker("choose_move", { time_ms, player: COMPUTER });
+            console.log(`Search completed depth ${depth}, ${nodes} nodes`);
+            if (move < 0) {
+                winner = "draw";
+                $("#status").textContent = "Game over: draw";
+                return;
             }
-        }
+            const end = performance.now();
 
-        highlight_last_move({ r, c });
-        await have_winner();
+            const r = (move >> 8) & 0xff;
+            const c = move & 0xff;
+            const msg = `computer move (${String.fromCharCode(65 + c)}${r + 1}) in ${(end - start).toFixed(2)} ms`;
+            console.log(msg);
+
+            $("#duration").textContent = msg;
+
+            await callWorker("place", { r, c, player: COMPUTER });
+            await callWorker("print_board_at", { r, c });
+
+            store_move({ r, c }, COMPUTER);
+
+            BOARD[r][c] = PLAYER_NAMES[COMPUTER];
+            for (const field of $$(".field")) {
+                if (Number(field.dataset.row) === r && Number(field.dataset.col) === c) {
+                    field.textContent = PLAYER_NAMES[COMPUTER];
+                    break;
+                }
+            }
+
+            highlight_last_move({ r, c });
+            await have_winner();
+        } catch (error) {
+            console.error(error);
+            $("#status").textContent = "The move could not be completed. Reload to start a new game.";
+            winner = "error";
+        } finally {
+            update_thinking(false);
+        }
     });
 }
 

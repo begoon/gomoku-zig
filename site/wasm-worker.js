@@ -15,6 +15,7 @@ function respond(id, ok, result, error) {
 }
 
 const env = {
+    now_ms: () => performance.now(),
     console: (ptr, len) => {
         const text = readStr(ptr, len);
         consoleBuffer += text;
@@ -70,10 +71,10 @@ const handlers = {
         respond(id, true, v);
     },
 
-    choose_move({ id, depth, player }) {
+    choose_move({ id, time_ms, player }) {
         // heavy computation happens here off the main thread
-        const move = instance.exports.choose_move(handle, depth, player);
-        respond(id, true, move);
+        const move = instance.exports.choose_move_timed(handle, time_ms, player);
+        respond(id, true, { move, depth: instance.exports.search_depth(handle), nodes: instance.exports.search_nodes(handle) });
     },
 
     free({ id }) {

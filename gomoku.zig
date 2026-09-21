@@ -12,16 +12,94 @@ extern fn console(msg: [*]const u8, len: usize) void;
 extern fn status(msg: [*]const u8, len: usize) void;
 extern fn enter() void;
 
-const DEPTH = 6;
-const QDEPTH: i32 = 1; // tune 2..6 based on speed
-const QUIET_THRESHOLD: i32 = 400; // adjusted for new weights
-const ORDER_MOVES = true; // tune true/false based on speed
-const MAX_DEPTH: usize = DEPTH + QDEPTH + 2; // max plies for killer table
+const QDEPTH: i32 = 2;
+const MAX_DEPTH: usize = 64;
+pub const WIN: i32 = 1_000_000;
+const TT_SIZE = 4096;
+extern fn now_ms() f64;
+
+fn milliseconds() f64 {
+    if (WASM) return now_ms();
+    return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds())) / std.time.ns_per_ms;
+}
+
+pub const SearchOptions = struct {
+    max_depth: i32 = 32,
+    time_ms: u32 = 1000,
+    node_limit: usize = 0, // Deterministic budget for tests and benchmarks; 0 is unlimited.
+    use_tt: bool = true,
+    threat_depth: i32 = 8, // Bounded continuous-four search; 0 disables it.
+    profile: bool = false,
+    progress: bool = false,
+};
+
+pub const SearchResult = struct {
+    move: Move,
+    score: i32 = 0, // From the computer's perspective.
+    completed_depth: i32 = 0,
+    timed_out: bool = false,
+};
+
+const Bound = enum { exact, lower, upper };
+const TTEntry = struct {
+    key: u64 = 0,
+    depth: i32 = -1,
+    score: i32 = 0, // Mate distance normalized to this position.
+    bound: Bound = .exact,
+    move: Move = .{ .r = -1, .c = -1 },
+};
+
+fn stone_key(move: Move, player: Field) u64 {
+    var z = @as(u64, @intCast((move.r * N + move.c) * 2)) + @as(u64, @intCast(player_index(player))) + 0x9e3779b97f4a7c15;
+    z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+    z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+    return z ^ (z >> 31);
+}
+
+fn opponent(player: Field) Field {
+    return if (player == .computer) .human else .computer;
+}
+
+fn mate(player: Field, ply: i32) i32 {
+    return if (player == .computer) WIN - ply else -WIN + ply;
+}
+
+fn same_move(a: Move, b: Move) bool {
+    return a.r == b.r and a.c == b.c;
+}
+
+pub const Threat = struct {
+    win: bool = false,
+    fours: u8 = 0, // Distinct next-move winning squares.
+    threes: u8 = 0, // Directions containing an open straight or broken three.
+    twos: u8 = 0,
+
+    fn critical(t: Threat) bool {
+        return t.win or t.fours > 0 or t.threes > 0;
+    }
+
+    fn value(t: Threat) i32 {
+        if (t.win) return WIN;
+        if (t.fours >= 2) return 100_000;
+        if (t.fours > 0 and t.threes > 0) return 50_000;
+        if (t.fours > 0) return 10_000;
+        if (t.threes >= 2) return 8000;
+        return @as(i32, t.threes) * 1000 + @as(i32, t.twos) * 40;
+    }
+};
+
+const Undo = struct {
+    row: [2]i32,
+    col: [2]i32,
+    left: [2]i32,
+    right: [2]i32,
+    totals: [2]i32,
+};
 
 pub const N: i32 = 15;
 pub const NN: usize = N * N;
 
-// Keep evaluation sensitive to shortest scored pattern (currently 3..6).
+// Keep evaluation sensitive to shortest scored pattern (currently 3..7).
 const MIN_EVAL_PATTERN_LEN: usize = 3;
 
 pub const Field = enum {
@@ -101,12 +179,8 @@ pub const Stats = struct {
     choose_move_time_ns: u64 = 0,
 
     quiescence_count: usize = 0,
-    quiescence_time_ns: u64 = 0,
-    quiescence_time_avg_ns: u64 = 0,
 
     available_moves_calls: usize = 0,
-    available_moves_time_ns: u64 = 0,
-    available_moves_time_avg_ns: u64 = 0,
 
     check_pattern_calls: usize = 0,
     check_pattern_time_ns: u64 = 0,
@@ -117,40 +191,25 @@ pub const Stats = struct {
     check_patterns_time_avg_ns: u64 = 0,
 
     pruning_count: usize = 0,
+    nodes: usize = 0,
+    tt_hits: usize = 0,
+    threat_nodes: usize = 0,
+    completed_depth: i32 = 0,
 
     pub fn reset(self: *Stats) void {
-        self.analyzed_moves = 0;
-        self.choose_move_time_ns = 0;
-
-        self.quiescence_count = 0;
-        self.quiescence_time_ns = 0;
-        self.quiescence_time_avg_ns = 0;
-
-        self.available_moves_calls = 0;
-        self.available_moves_time_ns = 0;
-        self.available_moves_time_avg_ns = 0;
-
-        self.check_pattern_calls = 0;
-        self.check_pattern_time_ns = 0;
-        self.check_pattern_time_avg_ns = 0;
-
-        self.check_patterns_calls = 0;
-        self.check_patterns_time_ns = 0;
-        self.check_patterns_time_avg_ns = 0;
-
-        self.pruning_count = 0;
+        self.* = .{};
     }
 
     pub fn print(self: *const Stats) void {
-        output("stats:\n", .{});
+        output("stats: nodes={}, tt hits={}, threat nodes={}, completed depth={}\n", .{ self.nodes, self.tt_hits, self.threat_nodes, self.completed_depth });
         if (!WASM) {
-            output("- analyzed_moves: {any} in {any}s\n", .{ self.analyzed_moves, ns_to_s(self.choose_move_time_ns) });
-            output("- quiescence_count: {any} time(s): {any}, avg(s): {any}\n", .{ self.quiescence_count, ns_to_s(self.quiescence_time_ns), ns_to_s(self.quiescence_time_avg_ns) });
-            output("- available_moves calls: {any}, time(s): {any}, avg(s): {any}\n", .{ self.available_moves_calls, ns_to_s(self.available_moves_time_ns), ns_to_s(self.available_moves_time_avg_ns) });
+            output("- placements: {any} in {any}s\n", .{ self.analyzed_moves, ns_to_s(self.choose_move_time_ns) });
+            output("- quiescence nodes: {}\n", .{self.quiescence_count});
+            output("- available_moves calls: {}\n", .{self.available_moves_calls});
             output("- check_pattern calls: {any}, time(s): {any}, avg(s): {any}\n", .{ self.check_pattern_calls, ns_to_s(self.check_pattern_time_ns), ns_to_s(self.check_pattern_time_avg_ns) });
             output("- a/b pruning count: {any}\n", .{self.pruning_count});
         } else {
-            output("- analyzed_moves: {any}\n", .{self.analyzed_moves});
+            output("- placements: {any}\n", .{self.analyzed_moves});
             output("- quiescence_count: {any}\n", .{self.quiescence_count});
             output("- available_moves calls: {any}\n", .{self.available_moves_calls});
             output("- check_pattern calls: {any}\n", .{self.check_pattern_calls});
@@ -185,36 +244,18 @@ pub const Game = struct {
     diagonal_left_cache: [DIAGONALS][2]i32 = [_][2]i32{[_]i32{-1} ** 2} ** DIAGONALS, // ↘ (r - c constant)
     diagonal_right_cache: [DIAGONALS][2]i32 = [_][2]i32{[_]i32{-1} ** 2} ** DIAGONALS, // ↙ (r + c constant)
 
-    // frontier for move generation
+    // Move history for LIFO undo
     move_stack: [NN]Move = undefined,
     stack_len: usize = 0,
 
-    // per-position mark to avoid duplicates when building candidate list
-    // uses an epoch counter so it does not have to clear the array every time
-    marks: [N][N]u32 = [_][N]u32{[_]u32{0} ** N} ** N,
-    mark_epoch: u32 = 1,
-
-    // killer move heuristic: 2 killer moves per depth
-    killers: [MAX_DEPTH][2]?Move = [_][2]?Move{.{ null, null }} ** MAX_DEPTH,
-
-    inline fn mark_once(self: *Game, m: Move) bool {
-        const r: usize = @intCast(m.r);
-        const c: usize = @intCast(m.c);
-        if (self.marks[r][c] == self.mark_epoch) return false; // already added
-        self.marks[r][c] = self.mark_epoch;
-        return true;
-    }
-
-    inline fn next_epoch(self: *Game) void {
-        self.mark_epoch +%= 1; // wrapping add
-        if (self.mark_epoch == 0) {
-            // extremely unlikely, but keep it robust
-            inline for (0..N) |r| {
-                inline for (0..N) |c| self.marks[r][c] = 0;
-            }
-            self.mark_epoch = 1;
-        }
-    }
+    undo_stack: [NN]Undo = undefined,
+    hash: u64 = 0,
+    tt: [TT_SIZE]TTEntry = @splat(.{}),
+    options: SearchOptions = .{},
+    deadline: f64 = 0,
+    stopped: bool = false,
+    last_progress: f64 = 0,
+    killers: [MAX_DEPTH][2]Move = @splat(@splat(Move.at(-1, -1))),
 
     pub inline fn at(self: *const Game, move: Move) Field {
         const r: usize = @intCast(move.r);
@@ -239,6 +280,14 @@ pub const Game = struct {
 
         const r: usize = @intCast(move.r);
         const c: usize = @intCast(move.c);
+        self.undo_stack[self.stack_len] = .{
+            .row = self.row_cache[r],
+            .col = self.col_cache[c],
+            .left = self.diagonal_left_cache[left_to_right_diagonal_index(move.r, move.c)],
+            .right = self.diagonal_right_cache[right_to_left_diagonal_index(move.r, move.c)],
+            .totals = self.totals,
+        };
+        self.hash ^= stone_key(move, player);
         self.board[r][c] = player;
 
         self.move_stack[self.stack_len] = move;
@@ -257,12 +306,19 @@ pub const Game = struct {
 
         const r: usize = @intCast(move.r);
         const c: usize = @intCast(move.c);
+        self.hash ^= stone_key(move, self.board[r][c]);
         self.board[r][c] = .empty;
 
         self.stack_len -= 1;
         std.debug.assert(self.move_stack[self.stack_len].r == move.r and self.move_stack[self.stack_len].c == move.c);
 
-        self.recompute_lines_at(move);
+        const undo = self.undo_stack[self.stack_len];
+        self.row_cache[r] = undo.row;
+        self.col_cache[c] = undo.col;
+        self.diagonal_left_cache[left_to_right_diagonal_index(move.r, move.c)] = undo.left;
+        self.diagonal_right_cache[right_to_left_diagonal_index(move.r, move.c)] = undo.right;
+        self.totals = undo.totals;
+        self.evaluation = self.totals[1] - self.totals[0];
     }
 
     pub fn is_full(self: *const Game) bool {
@@ -278,6 +334,7 @@ pub const Game = struct {
 
     pub fn check_win_at(self: *const Game, move: Move) Field {
         const player = self.at(move);
+        if (player == .empty) return .empty;
         inline for (DIRECTIONS) |dir| {
             var count: i32 = 1;
             // forward
@@ -299,11 +356,11 @@ pub const Game = struct {
         self.counters.check_pattern_calls += 1;
 
         var start_time: TimerType = undefined;
-        if (!WASM) {
+        if (!WASM and self.options.profile) {
             start_time = std.Io.Clock.awake.now(io);
         }
         defer {
-            if (!WASM) {
+            if (!WASM and self.options.profile) {
                 const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.check_pattern_time_ns += elapsed;
                 self.counters.check_pattern_time_avg_ns = (self.counters.check_pattern_time_avg_ns + elapsed) / 2;
@@ -442,11 +499,11 @@ pub const Game = struct {
         self.counters.check_patterns_calls += 1;
 
         var start_time: TimerType = undefined;
-        if (!WASM) {
+        if (!WASM and self.options.profile) {
             start_time = std.Io.Clock.awake.now(io);
         }
         defer {
-            if (!WASM) {
+            if (!WASM and self.options.profile) {
                 const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
                 self.counters.check_patterns_time_ns += elapsed;
                 self.counters.check_patterns_time_avg_ns = (self.counters.check_patterns_time_avg_ns + elapsed) / 2;
@@ -483,619 +540,394 @@ pub const Game = struct {
         return self.evaluation;
     }
 
-    pub fn available_moves(self: *Game, backing: *[NN]Move) []Move {
-        self.counters.available_moves_calls += 1;
+    const TimerType = if (WASM) void else std.Io.Timestamp;
 
-        var start_time: TimerType = undefined;
-        if (!WASM) {
-            start_time = std.Io.Clock.awake.now(io);
+    // Inspect a hypothetical move without modifying caches, counters, or history.
+    pub fn would_win(self: *const Game, move: Move, player: Field) bool {
+        if (!move.in() or !self.empty_at(move)) return false;
+        for (DIRECTIONS) |dir| {
+            var count: usize = 1;
+            for ([_]i32{ -1, 1 }) |sign| {
+                var m = Move.at(move.r + sign * dir.r, move.c + sign * dir.c);
+                while (m.in() and self.at(m) == player) : (m = Move.at(m.r + sign * dir.r, m.c + sign * dir.c)) {
+                    count += 1;
+                }
+            }
+            if (count >= 5) return true;
         }
-        defer {
-            if (!WASM) {
-                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
-                self.counters.available_moves_time_ns += elapsed;
-                self.counters.available_moves_time_avg_ns = (self.counters.available_moves_time_avg_ns + elapsed) / 2;
+        return false;
+    }
+
+    pub fn threat_at(self: *const Game, move: Move, player: Field) Threat {
+        var result: Threat = .{};
+        if (!move.in() or !self.empty_at(move)) return result;
+        for (DIRECTIONS) |dir| {
+            var line: [11]u8 = undefined;
+            for (&line, 0..) |*cell, i| {
+                const offset = @as(i32, @intCast(i)) - 5;
+                const m = Move.at(move.r + offset * dir.r, move.c + offset * dir.c);
+                cell.* = if (i == 5) 'X' else if (!m.in()) '.' else switch (self.at(m)) {
+                    .empty => '_',
+                    else => |p| if (p == player) 'X' else '.',
+                };
+            }
+            var gaps: [11]bool = @splat(false);
+            for (1..6) |start| {
+                var stones: usize = 0;
+                var empty: usize = 0;
+                var gap: usize = 0;
+                for (start..start + 5) |i| {
+                    if (line[i] == 'X') stones += 1;
+                    if (line[i] == '_') {
+                        empty += 1;
+                        gap = i;
+                    }
+                }
+                if (stones == 5) result.win = true;
+                if (stones == 4 and empty == 1) gaps[gap] = true;
+            }
+            for (gaps) |gap| {
+                if (gap) result.fours += 1;
+            }
+            var three = false;
+            var two = false;
+            inline for (.{ "_XXX_", "_XX_X_", "_X_XX_" }) |pattern| {
+                for (0..line.len - pattern.len + 1) |start| {
+                    if (start <= 5 and start + pattern.len > 5 and std.mem.eql(u8, line[start..][0..pattern.len], pattern)) three = true;
+                }
+            }
+            inline for (.{ "_XX_", "_X_X_" }) |pattern| {
+                for (0..line.len - pattern.len + 1) |start| {
+                    if (start <= 5 and start + pattern.len > 5 and std.mem.eql(u8, line[start..][0..pattern.len], pattern)) two = true;
+                }
+            }
+            if (three) result.threes += 1;
+            if (two) result.twos += 1;
+        }
+        return result;
+    }
+
+    fn nearby(self: *const Game, m: Move) bool {
+        var dr: i32 = -2;
+        while (dr <= 2) : (dr += 1) {
+            var dc: i32 = -2;
+            while (dc <= 2) : (dc += 1) {
+                const v = Move.at(m.r + dr, m.c + dc);
+                if (v.in() and !self.empty_at(v)) return true;
             }
         }
+        return false;
+    }
 
-        // 0. opening: play center
+    // Canonical board scan and coordinate tie breaks make pruning independent
+    // of move history, which is essential for transposition-table reuse.
+    pub fn available_moves(self: *Game, backing: *[NN]Move) []Move {
+        self.counters.available_moves_calls += 1;
         if (self.stack_len == 0) {
-            backing[0] = Move.at(@intCast(N / 2), @intCast(N / 2));
+            backing[0] = Move.at(N / 2, N / 2);
             return backing[0..1];
         }
-
-        // tunables
-        const TARGET: usize = 28; // if we have fewer than this after R=1, add ring-2
-        const MAX_CANDIDATES: usize = 40; // cap the final candidate list by hotness
-
-        self.next_epoch();
+        var scores: [NN]i32 = undefined;
         var n: usize = 0;
-
-        // Use ALL stones for ring-1 to avoid missing blocking moves near older stones.
-        const start_stack_index: usize = 0;
-
-        const ring1: [8]Move = .{
-            // corners
-            .{ .r = -1, .c = -1 }, .{ .r = -1, .c = 1 },
-            .{ .r = 1, .c = -1 },  .{ .r = 1, .c = 1 },
-            // axis
-            .{ .r = -1, .c = 0 },  .{ .r = 1, .c = 0 },
-            .{ .r = 0, .c = -1 },  .{ .r = 0, .c = 1 },
-        };
-
-        const ring2: [16]Move = .{
-            // axis
-            .{ .r = -2, .c = 0 },  .{ .r = 2, .c = 0 },
-            .{ .r = 0, .c = -2 },  .{ .r = 0, .c = 2 },
-            // corners
-            .{ .r = -2, .c = -2 }, .{ .r = -2, .c = 2 },
-            .{ .r = 2, .c = -2 },  .{ .r = 2, .c = 2 },
-            // “knight-band”
-            .{ .r = -2, .c = -1 }, .{ .r = -2, .c = 1 },
-            .{ .r = 2, .c = -1 },  .{ .r = 2, .c = 1 },
-            .{ .r = -1, .c = -2 }, .{ .r = 1, .c = -2 },
-            .{ .r = -1, .c = 2 },  .{ .r = 1, .c = 2 },
-        };
-
-        var ring_1_index: usize = start_stack_index;
-
-        while (ring_1_index < self.stack_len) : (ring_1_index += 1) {
-            const origin = self.move_stack[ring_1_index];
-            for (ring1) |offset| {
-                const v = Move.at(origin.r + offset.r, origin.c + offset.c);
-                if (!v.in() or !self.empty_at(v)) continue;
-                if (!self.mark_once(v)) continue;
-                backing[n] = v;
+        var critical_count: usize = 0;
+        for (0..N) |r| {
+            for (0..N) |c| {
+                const m = Move.at(@intCast(r), @intCast(c));
+                if (!self.empty_at(m) or !self.nearby(m)) continue;
+                const a = self.threat_at(m, .computer);
+                const b = self.threat_at(m, .human);
+                const critical = a.critical() or b.critical();
+                if (critical) critical_count += 1;
+                const score = @max(a.value(), b.value()) * 2 + @min(a.value(), b.value()) + @as(i32, if (critical) 4_000_000 else 0);
+                var j = n;
+                while (j > 0 and scores[j - 1] < score) : (j -= 1) {
+                    scores[j] = scores[j - 1];
+                    backing[j] = backing[j - 1];
+                }
+                scores[j] = score;
+                backing[j] = m;
                 n += 1;
             }
         }
-
-        // 2. If still thin, add Chebyshev ring-2 around the same last-K origins (once).
-        if (n < TARGET) {
-            var ring_2_index: usize = start_stack_index;
-            while (ring_2_index < self.stack_len) : (ring_2_index += 1) {
-                const origin = self.move_stack[ring_2_index];
-                for (ring2) |off| {
-                    const v = Move.at(origin.r + off.r, origin.c + off.c);
-                    if (!v.in() or !self.empty_at(v)) continue;
-                    if (!self.mark_once(v)) continue;
-                    backing[n] = v;
-                    n += 1;
-                }
-            }
-        }
-
-        // 3. Fallback for pathological near-full boards.
-        if (n == 0) {
-            inline for (0..N) |r| {
-                for (0..N) |c| {
-                    const m = Move.at(@intCast(r), @intCast(c));
-                    if (self.empty_at(m)) {
-                        backing[n] = m;
-                        n += 1;
-                    }
-                }
-            }
-        }
-
-        // 4. Soft cap by local_hotness: keep only the hottest ~MAX_CANDIDATES,
-        // but avoid fully reordering beyond the kept prefix.
-        if (n > MAX_CANDIDATES) {
-            var scores: [NN]u8 = undefined;
-
-            // 4.1 compute scores and track observed max
-            var max_hot: u8 = 0;
-            var i: usize = 0;
-            while (i < n) : (i += 1) {
-                const v = self.local_hotness(backing[i]);
-                scores[i] = v;
-                if (v > max_hot) max_hot = v;
-            }
-
-            // 4.2 build small histogram of hotness
-            // allow room for weighted hotness (for example, up to 32)
-            var histogram: [64]usize = [_]usize{0} ** 64;
-            i = 0;
-            while (i < n) : (i += 1) {
-                histogram[scores[i]] += 1;
-            }
-
-            // 4.3 find cutoff h* such that cumulative from top >= MAX_CANDIDATES
-            var need: usize = MAX_CANDIDATES;
-            var cutoff: u8 = 0;
-            var above_count: usize = 0;
-            var h: i32 = @intCast(max_hot);
-            while (h >= 0) : (h -= 1) {
-                const count = histogram[@intCast(h)];
-                if (count >= need) {
-                    cutoff = @intCast(h);
-                    above_count = MAX_CANDIDATES - need + count; // total of >= cutoff
-                    break;
-                }
-                need -= count;
-            }
-
-            // 4.4 stable-compact into the front:
-            // pass 1: strictly hotter than cutoff
-            var write: usize = 0;
-            i = 0;
-            while (i < n) : (i += 1) {
-                if (scores[i] > cutoff) {
-                    if (i != write) {
-                        swap(&backing[write], &backing[i]);
-                        swap_u8(&scores[write], &scores[i]);
-                    }
-                    write += 1;
-                }
-            }
-
-            // pass 2: equal to cutoff, until we reach MAX_CANDIDATES
-            i = 0;
-            while (write < MAX_CANDIDATES and i < n) : (i += 1) {
-                if (scores[i] == cutoff) {
-                    if (i != write) {
-                        swap(&backing[write], &backing[i]);
-                        swap_u8(&scores[write], &scores[i]);
-                    }
-                    write += 1;
-                }
-            }
-
-            // shrink to the kept prefix
-            n = MAX_CANDIDATES;
-
-            // Reset epoch marks and re-mark only the kept candidates.
-            // Without this, add_threat_moves can't re-add critical moves
-            // that were dropped by the hotness cap (their marks still exist).
-            self.next_epoch();
-            for (backing[0..n]) |m| {
-                _ = self.mark_once(m);
-            }
-        }
-
-        // 5. Force-add threat moves: endpoints of runs of 3+ for either player.
-        // These are critical blocking/extension positions that the hotness cap may drop.
-        self.add_threat_moves(backing, &n);
-
-        return backing[0..n];
+        return backing[0..@min(n, @max(32, critical_count))];
     }
 
-    // Scan all stones for runs of 3+ in each direction.
-    // Add the open endpoints to the candidate list if not already present.
-    fn add_threat_moves(self: *Game, backing: *[NN]Move, n: *usize) void {
-        for (0..self.stack_len) |si| {
-            const stone = self.move_stack[si];
-            const player = self.at(stone);
-            if (player == .empty) continue;
+    const Tactics = struct {
+        win: ?Move = null,
+        block: ?Move = null,
+        opponent_wins: usize = 0,
+    };
 
-            for (DIRECTIONS) |dir| {
-                // Only process if this stone is the START of a run
-                // (previous cell in this direction is not the same player)
-                const prev = Move.at(stone.r - dir.r, stone.c - dir.c);
-                if (prev.in() and self.at(prev) == player) continue;
-
-                // Count run length
-                var count: i32 = 0;
-                var v = stone;
-                while (v.in() and self.at(v) == player) : (v = Move.at(v.r + dir.r, v.c + dir.c)) {
-                    count += 1;
-                }
-
-                if (count >= 3) {
-                    // v = one past the end of the run (forward endpoint)
-                    if (v.in() and self.empty_at(v)) {
-                        if (self.mark_once(v)) {
-                            backing[n.*] = v;
-                            n.* += 1;
-                        }
-                    }
-                    // prev = one before the start (backward endpoint)
-                    if (prev.in() and self.empty_at(prev)) {
-                        if (self.mark_once(prev)) {
-                            backing[n.*] = prev;
-                            n.* += 1;
-                        }
-                    }
-                }
-
-                // Also check for gapped patterns: X_XX or XX_X (run of 2 + gap + 1-2)
-                if (count >= 2 and v.in() and self.empty_at(v)) {
-                    const after_gap = Move.at(v.r + dir.r, v.c + dir.c);
-                    if (after_gap.in() and self.at(after_gap) == player) {
-                        // Found XX_X or longer - the gap position is critical
-                        if (self.mark_once(v)) {
-                            backing[n.*] = v;
-                            n.* += 1;
-                        }
-                    }
+    fn tactics(self: *const Game, player: Field) Tactics {
+        var result: Tactics = .{};
+        for (0..N) |r| {
+            for (0..N) |c| {
+                const m = Move.at(@intCast(r), @intCast(c));
+                if (!self.empty_at(m)) continue;
+                if (self.would_win(m, player)) result.win = m;
+                if (self.would_win(m, opponent(player))) {
+                    result.block = m;
+                    result.opponent_wins += 1;
                 }
             }
         }
+        return result;
     }
 
-    inline fn local_hotness(self: *const Game, move: Move) u8 {
-        var sum: u8 = 0;
-        comptime {
-            @setEvalBranchQuota(100_000);
-        }
-        // count non-empty neighbors in the 8-neighborhood.
-        inline for ([_]i32{ -1, 0, 1 }) |dr| {
-            inline for ([_]i32{ -1, 0, 1 }) |dc| {
-                if (dr == 0 and dc == 0) continue;
-                const v = Move.at(move.r + dr, move.c + dc);
-                if (v.in() and !self.empty_at(v)) sum +%= 1;
+    fn stop(self: *Game) bool {
+        if (self.stopped) return true;
+        if (self.options.node_limit > 0 and self.counters.nodes + self.counters.threat_nodes >= self.options.node_limit) self.stopped = true;
+        if (self.options.time_ms > 0 and milliseconds() >= self.deadline) self.stopped = true;
+        return self.stopped;
+    }
+
+    fn order_moves(self: *const Game, moves: []Move, player: Field, preferred: Move, ply: i32) void {
+        var scores: [NN]i32 = undefined;
+        for (moves, 0..) |m, i| {
+            const own = self.threat_at(m, player);
+            const other = self.threat_at(m, opponent(player));
+            const killers = self.killers[@min(MAX_DEPTH - 1, @as(usize, @intCast(ply)))];
+            const killer_bonus: i32 = if (same_move(m, killers[0]) or same_move(m, killers[1])) 300 else 0;
+            const score = if (same_move(m, preferred)) 10_000_000 else own.value() * 2 + other.value() + killer_bonus;
+            var j = i;
+            while (j > 0 and scores[j - 1] < score) : (j -= 1) {
+                scores[j] = scores[j - 1];
+                moves[j] = moves[j - 1];
             }
-        }
-        return sum;
-    }
-
-    const TimerType = if (WASM) void else std.Io.Timestamp;
-
-    fn clear_killers(self: *Game) void {
-        for (&self.killers) |*slot| {
-            slot[0] = null;
-            slot[1] = null;
-        }
-    }
-
-    fn store_killer(self: *Game, depth: i32, move: Move) void {
-        const d: usize = @intCast(@min(@as(i32, @intCast(MAX_DEPTH - 1)), depth));
-        if (self.killers[d][0]) |k0| {
-            if (k0.r == move.r and k0.c == move.c) return; // already stored
-        }
-        self.killers[d][1] = self.killers[d][0];
-        self.killers[d][0] = move;
-    }
-
-    // Promote killer moves to the front of the move list (if present and legal).
-    fn promote_killers(self: *Game, moves: []Move, depth: i32) void {
-        const d: usize = @intCast(@min(@as(i32, @intCast(MAX_DEPTH - 1)), depth));
-        var write: usize = 0;
-        for (self.killers[d]) |maybe_killer| {
-            const killer = maybe_killer orelse continue;
-            // find killer in moves and swap to front
-            var j: usize = write;
-            while (j < moves.len) : (j += 1) {
-                if (moves[j].r == killer.r and moves[j].c == killer.c) {
-                    if (j != write) {
-                        const tmp = moves[write];
-                        moves[write] = moves[j];
-                        moves[j] = tmp;
-                    }
-                    write += 1;
-                    break;
-                }
-            }
+            scores[j] = score;
+            moves[j] = m;
         }
     }
 
     pub fn choose_move(self: *Game, depth: i32, player: Field) Move {
+        return self.search(.{ .max_depth = depth, .time_ms = 0, .progress = !builtin.is_test }, player).move;
+    }
+
+    pub fn search(self: *Game, options: SearchOptions, player: Field) SearchResult {
+        std.debug.assert(player != .empty);
+        self.options = options;
         self.counters.reset();
+        self.stopped = false;
+        self.killers = @splat(@splat(Move.at(-1, -1)));
+        // Clear across calls because extension settings may have changed. Entries
+        // remain reusable across all iterations within this search.
+        for (&self.tt) |*entry| entry.depth = -1;
+        const start = milliseconds();
+        self.deadline = start + @as(f64, @floatFromInt(options.time_ms));
+        self.last_progress = start;
+        defer self.counters.choose_move_time_ns = @intFromFloat(@max(0, milliseconds() - start) * std.time.ns_per_ms);
+        if (self.is_full()) return .{ .move = Move.at(-1, -1) };
 
-        var start_time: TimerType = undefined;
-        if (!WASM) {
-            start_time = std.Io.Clock.awake.now(io);
-        }
-        defer {
-            if (!WASM) {
-                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
-                self.counters.choose_move_time_ns = elapsed;
-            }
-        }
-
+        const tactical = self.tactics(player);
+        if (tactical.win) |win| return .{ .move = win, .score = mate(player, 1) };
+        if (tactical.opponent_wins >= 2) return .{ .move = tactical.block.?, .score = mate(opponent(player), 2) };
         var backing: [NN]Move = undefined;
-        const moves = self.available_moves(&backing);
-        if (moves.len == 0) @panic("choose_move: no available moves");
-        if (moves.len == 1) return moves[0];
-
-        // iterative deepening: search at increasing depths
-        // using results from shallower searches for better move ordering
-        var best_move: ?Move = null;
-
-        var d: i32 = 1;
-        while (d <= depth) : (d += 1) {
-            self.clear_killers();
-
-            self.order_moves(moves, player);
-
-            // promote best move from previous iteration to front
-            if (best_move) |prev_best| {
-                for (moves, 0..) |m, idx| {
-                    if (m.r == prev_best.r and m.c == prev_best.c) {
-                        if (idx != 0) {
-                            const tmp = moves[0];
-                            moves[0] = moves[idx];
-                            moves[idx] = tmp;
-                        }
-                        break;
-                    }
+        const moves = if (tactical.block) |block| blk: {
+            backing[0] = block;
+            break :blk backing[0..1];
+        } else self.available_moves(&backing);
+        self.order_moves(moves, player, Move.at(-1, -1), 0);
+        var result: SearchResult = .{ .move = moves[0], .score = self.evaluate_static() };
+        if (self.stack_len == 0) return result;
+        var depth: i32 = 1;
+        while (depth <= @min(MAX_DEPTH - 1, @max(1, options.max_depth))) : (depth += 1) {
+            self.order_moves(moves, player, result.move, 0);
+            var best = moves[0];
+            var score: i32 = if (player == .computer) -WIN * 2 else WIN * 2;
+            var alpha: i32 = -WIN * 2;
+            var beta: i32 = WIN * 2;
+            for (moves, 0..) |m, i| {
+                if (self.stop()) break;
+                self.place(m, player);
+                const value = self.minimax(depth - 1, opponent(player), alpha, beta, m, 1);
+                self.unplace(m);
+                if (self.stopped) break;
+                if ((player == .computer and value > score) or (player == .human and value < score)) {
+                    score = value;
+                    best = m;
+                }
+                if (player == .computer) alpha = @max(alpha, score) else beta = @min(beta, score);
+                if (options.progress and milliseconds() - self.last_progress >= 100) {
+                    progress(i + 1, moves.len, best, self);
+                    self.last_progress = milliseconds();
                 }
             }
-
-            var alpha: i32 = -std.math.maxInt(i32);
-            var beta: i32 = std.math.maxInt(i32);
-
-            for (moves, 1..) |move, i| {
-                progress(i, moves.len, move, self);
-
-                self.place(move, player);
-
-                const opponent: Field = if (player == .computer) .human else .computer;
-                const value = self.minimax(d - 1, opponent, alpha, beta, move);
-
-                self.unplace(move);
-
-                if (player == .computer) {
-                    if (value > alpha) {
-                        alpha = value;
-                        best_move = move;
+            if (self.stopped) break;
+            result = .{ .move = best, .score = score, .completed_depth = depth };
+            self.counters.completed_depth = depth;
+            if (@abs(score) >= WIN - NN) break;
+            // Prove continuous-four attacks separately from the general search.
+            // Failure means unknown, never a proven loss.
+            if (depth == 1 and options.threat_depth > 0) {
+                if (self.prove_fours(player, @min(options.threat_depth, 16))) |proof| {
+                    if (!self.stopped) {
+                        result.move = proof.move;
+                        result.score = mate(player, proof.plies);
                     }
-                } else {
-                    if (value < beta) {
-                        beta = value;
-                        best_move = move;
-                    }
-                }
-            }
-
-            // early exit on forced win/loss
-            if (alpha >= 1_000_000 or beta <= -1_000_000) break;
-        }
-
-        if (best_move == null) @panic("choose_move: no best move found");
-        return best_move.?;
-    }
-
-    // Check if player has a four (can win next move) by checking all candidate positions.
-    fn find_winning_move(self: *Game, moves: []const Move, player: Field) ?Move {
-        for (moves) |move| {
-            self.place(move, player);
-            const w = self.check_win_at(move);
-            self.unplace(move);
-            if (w == player) return move;
-        }
-        return null;
-    }
-
-    // Filter moves to only those that block the opponent's winning move(s) + own wins.
-    fn get_forced_moves(self: *Game, all_moves: []Move, forced_backing: *[NN]Move, player: Field) []Move {
-        const opponent: Field = if (player == .computer) .human else .computer;
-        var n: usize = 0;
-
-        for (all_moves) |move| {
-            // check own immediate win
-            self.place(move, player);
-            var w = self.check_win_at(move);
-            self.unplace(move);
-            if (w == player) {
-                forced_backing[n] = move;
-                n += 1;
-                continue;
-            }
-
-            // check if this blocks an opponent win
-            self.place(move, opponent);
-            w = self.check_win_at(move);
-            self.unplace(move);
-            if (w == opponent) {
-                forced_backing[n] = move;
-                n += 1;
-            }
-        }
-        return forced_backing[0..n];
-    }
-
-    fn minimax(self: *Game, depth: i32, player: Field, alpha_: i32, beta_: i32, entry_move: Move) i32 {
-        const winner = self.check_win_at(entry_move);
-        if (winner != .empty) {
-            // Depth-adjusted scores: prefer winning sooner, losing later.
-            // Higher remaining depth = found earlier in search = fewer moves from root.
-            return if (winner == .computer) (1_000_000 + depth) else (-1_000_000 - depth);
-        }
-
-        var backing: [NN]Move = undefined;
-        const all_moves = self.available_moves(&backing);
-
-        if (depth == 0 or all_moves.len == 0) {
-            // quiescence instead of a hard horizon cut
-            if (QDEPTH > 0)
-                return self.quiescence(QDEPTH, player, alpha_, beta_);
-            return self.evaluate_static();
-        }
-
-        // 1. Check for own immediate win (play it)
-        if (self.find_winning_move(all_moves, player)) |win_move| {
-            self.place(win_move, player);
-            const opponent: Field = if (player == .computer) .human else .computer;
-            const score = self.minimax(depth - 1, opponent, alpha_, beta_, win_move);
-            self.unplace(win_move);
-            return score;
-        }
-
-        // 2. Check if opponent can win next move — if so, only consider forced responses
-        const opponent: Field = if (player == .computer) .human else .computer;
-        var forced_backing: [NN]Move = undefined;
-        const forced = self.get_forced_moves(all_moves, &forced_backing, player);
-
-        // If there are forced moves (opponent has a four), only search those.
-        const moves = if (forced.len > 0) forced else all_moves;
-
-        // order moves by immediate win or by delta to improve pruning
-        if (ORDER_MOVES) self.order_moves(moves, player);
-
-        // promote killer moves from previous searches at this depth
-        self.promote_killers(moves, depth);
-
-        var alpha = alpha_;
-        var beta = beta_;
-
-        for (moves) |move| {
-            self.place(move, player);
-            const score = self.minimax(depth - 1, opponent, alpha, beta, move);
-            self.unplace(move);
-
-            if (player == .computer) {
-                if (score > alpha) alpha = score;
-            } else {
-                if (score < beta) beta = score;
-            }
-
-            if (beta <= alpha) {
-                self.counters.pruning_count += 1;
-                self.store_killer(depth, move);
-                break; // cutoff
-            }
-        }
-        return if (player == .computer) alpha else beta;
-    }
-
-    // Larger is better for .computer, smaller for .human
-    fn move_delta(self: *Game, mv: Move, player: Field) i32 {
-        const before = self.evaluate_static();
-        self.place(mv, player);
-        const after = self.evaluate_static();
-        self.unplace(mv);
-        return after - before;
-    }
-
-    // Returns true if this move is "tactical": wins now, blocks an immediate win,
-    // or swings eval by a large amount (forcing moves / big threats).
-    fn is_tactical(self: *Game, move: Move, player: Field) bool {
-        // 1. our immediate win?
-        self.place(move, player);
-        var winner = self.check_win_at(move);
-        self.unplace(move);
-        if (winner == player) return true;
-
-        // 2. blocks opponent's immediate win?
-        const opponents: Field = if (player == .computer) .human else .computer;
-        self.place(move, opponents);
-        winner = self.check_win_at(move);
-        self.unplace(move);
-        if (winner == opponents) return true; // if opponent could win by playing here, blocking is tactical
-
-        // 3. big heuristic swing?
-        const delta = self.move_delta(move, player);
-        return @abs(delta) >= QUIET_THRESHOLD;
-    }
-
-    // Orders `moves` in-place: best-first for the side to move.
-    // Uses evaluation delta (one place/unplace per move).
-    fn order_moves(self: *Game, moves: []Move, player: Field) void {
-        if (moves.len <= 1) return;
-
-        var scores: [NN]i32 = undefined;
-
-        // pre-score with move_delta (single place/unplace per move)
-        var i: usize = 0;
-        while (i < moves.len) : (i += 1) {
-            var score: i32 = self.move_delta(moves[i], player);
-
-            // for the minimizing side, invert to still sort descending
-            if (player == .human) score = -score;
-
-            scores[i] = score;
-        }
-
-        // insertion sort (small arrays)
-        var k: usize = 1;
-        while (k < moves.len) : (k += 1) {
-            const key_move = moves[k];
-            const key_score = scores[k];
-            var j = k;
-            while (j > 0 and scores[j - 1] < key_score) : (j -= 1) {
-                scores[j] = scores[j - 1];
-                moves[j] = moves[j - 1];
-            }
-            scores[j] = key_score;
-            moves[j] = key_move;
-        }
-    }
-
-    fn quiescence(self: *Game, qdepth: i32, player: Field, alpha_: i32, beta_: i32) i32 {
-        var alpha = alpha_;
-        var beta = beta_;
-        const stand_pat = self.evaluate_static();
-
-        if (player == .computer) {
-            if (stand_pat >= beta) return beta;
-            if (stand_pat > alpha) alpha = stand_pat;
-        } else {
-            if (stand_pat <= alpha) return alpha;
-            if (stand_pat < beta) beta = stand_pat;
-        }
-
-        if (qdepth <= 0) return stand_pat;
-
-        self.counters.quiescence_count += 1;
-
-        var start_time: TimerType = undefined;
-        if (!WASM) {
-            start_time = std.Io.Clock.awake.now(io);
-        }
-        defer {
-            if (!WASM) {
-                const elapsed: u64 = @intCast(start_time.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds());
-                self.counters.quiescence_time_ns += elapsed;
-                self.counters.quiescence_time_avg_ns = (self.counters.quiescence_time_avg_ns + elapsed) / 2;
-            }
-        }
-
-        var backing: [NN]Move = undefined;
-        var noisy_backing: [NN]Move = undefined;
-
-        const moves = self.available_moves(&backing);
-
-        var n: usize = 0;
-        for (moves) |move| {
-            if (self.is_tactical(move, player)) {
-                noisy_backing[n] = move;
-                n += 1;
-            }
-        }
-        const noisy = noisy_backing[0..n];
-
-        if (noisy.len == 0) return stand_pat;
-
-        self.order_moves(noisy, player);
-
-        for (noisy) |move| {
-            self.place(move, player);
-
-            // explicit terminal check to cut immediately on wins
-            const winner = self.check_win_at(move);
-            if (winner != .empty) {
-                const score: i32 = if (winner == .computer) 1_000_000 else -1_000_000; // qdepth is small, no depth adjustment needed
-                self.unplace(move);
-
-                if (player == .computer) {
-                    if (score > alpha) alpha = score;
-                } else {
-                    if (score < beta) beta = score;
-                }
-
-                if (beta <= alpha) {
-                    self.counters.pruning_count += 1;
                     break;
                 }
-                // continue to next noisy move if no cutoff
-                continue;
             }
-
-            const opponents: Field = if (player == .computer) .human else .computer;
-            const score = self.quiescence(qdepth - 1, opponents, alpha, beta);
-            self.unplace(move);
-
-            if (player == .computer) {
-                if (score > alpha) alpha = score;
-            } else {
-                if (score < beta) beta = score;
-            }
-
-            if (beta <= alpha) break;
         }
+        result.timed_out = self.stopped;
+        return result;
+    }
 
-        return if (player == .computer) alpha else beta;
+    fn tt_score(score: i32, ply: i32, store: bool) i32 {
+        const adjustment = if (store) ply else -ply;
+        if (score >= WIN - NN) return score + adjustment;
+        if (score <= -WIN + @as(i32, NN)) return score - adjustment;
+        return score;
+    }
+
+    fn minimax(self: *Game, depth: i32, player: Field, alpha_: i32, beta_: i32, entry_move: Move, ply: i32) i32 {
+        if (self.check_win_at(entry_move) != .empty) return mate(opponent(player), ply);
+        if (depth <= 0) return self.quiescence(QDEPTH, player, alpha_, beta_, ply);
+        self.counters.nodes += 1;
+        if (self.stop()) return 0;
+        if (self.is_full()) return 0;
+        const tactical = self.tactics(player);
+        if (tactical.win != null) return mate(player, ply + 1);
+        if (tactical.opponent_wins >= 2) return mate(opponent(player), ply + 2);
+        const key = self.hash ^ (if (player == .computer) @as(u64, 0xa0761d6478bd642f) else 0xe7037ed1a0b428db);
+        const slot: usize = @intCast(key % TT_SIZE);
+        const entry = self.tt[slot];
+        var preferred = Move.at(-1, -1);
+        if (self.options.use_tt and entry.depth >= 0 and entry.key == key) {
+            preferred = entry.move;
+            self.counters.tt_hits += 1;
+            const score = tt_score(entry.score, ply, false);
+            if (entry.depth >= depth) {
+                if (entry.bound == .exact or (entry.bound == .lower and score >= beta_) or (entry.bound == .upper and score <= alpha_)) return score;
+            }
+        }
+        var backing: [NN]Move = undefined;
+        const moves = if (tactical.block) |block| blk: {
+            backing[0] = block;
+            break :blk backing[0..1];
+        } else self.available_moves(&backing);
+        self.order_moves(moves, player, preferred, ply);
+        var alpha = alpha_;
+        var beta = beta_;
+        var best = moves[0];
+        var value: i32 = if (player == .computer) -WIN * 2 else WIN * 2;
+        for (moves) |m| {
+            self.place(m, player);
+            const score = self.minimax(depth - 1, opponent(player), alpha, beta, m, ply + 1);
+            self.unplace(m);
+            if (self.stopped) return 0;
+            if ((player == .computer and score > value) or (player == .human and score < value)) {
+                value = score;
+                best = m;
+            }
+            if (player == .computer) alpha = @max(alpha, value) else beta = @min(beta, value);
+            if (alpha >= beta) {
+                self.counters.pruning_count += 1;
+                const killers = &self.killers[@min(MAX_DEPTH - 1, @as(usize, @intCast(ply)))];
+                if (!same_move(m, killers[0])) {
+                    killers[1] = killers[0];
+                    killers[0] = m;
+                }
+                break;
+            }
+        }
+        if (self.options.use_tt) self.tt[slot] = .{
+            .key = key,
+            .depth = depth,
+            .score = tt_score(value, ply, true),
+            .bound = if (value <= alpha_) .upper else if (value >= beta_) .lower else .exact,
+            .move = best,
+        };
+        return value;
+    }
+
+    fn quiescence(self: *Game, depth: i32, player: Field, alpha_: i32, beta_: i32, ply: i32) i32 {
+        self.counters.nodes += 1;
+        self.counters.quiescence_count += 1;
+        if (self.stop()) return 0;
+        if (self.is_full()) return 0;
+        const tactical = self.tactics(player);
+        if (tactical.win != null) return mate(player, ply + 1);
+        if (tactical.opponent_wins >= 2) return mate(opponent(player), ply + 2);
+        // Never stand pat while a forced block is pending, even at depth zero.
+        if (tactical.block) |block| {
+            self.place(block, player);
+            defer self.unplace(block);
+            return self.quiescence(depth - 1, opponent(player), alpha_, beta_, ply + 1);
+        }
+        var value = self.evaluate_static();
+        if (depth <= 0) return value;
+        var alpha = alpha_;
+        var beta = beta_;
+        if (player == .computer) {
+            if (value >= beta) return value;
+            alpha = @max(alpha, value);
+        } else {
+            if (value <= alpha) return value;
+            beta = @min(beta, value);
+        }
+        var backing: [NN]Move = undefined;
+        const candidates = self.available_moves(&backing);
+        var n: usize = 0;
+        for (candidates) |m| {
+            const threat = self.threat_at(m, player);
+            if (threat.fours > 0 or threat.threes >= 2) {
+                backing[n] = m;
+                n += 1;
+            }
+        }
+        const moves = backing[0..n];
+        self.order_moves(moves, player, Move.at(-1, -1), ply);
+        for (moves) |m| {
+            self.place(m, player);
+            const score = self.quiescence(depth - 1, opponent(player), alpha, beta, ply + 1);
+            self.unplace(m);
+            if (self.stopped) return 0;
+            if (player == .computer) {
+                value = @max(value, score);
+                alpha = @max(alpha, value);
+            } else {
+                value = @min(value, score);
+                beta = @min(beta, value);
+            }
+            if (alpha >= beta) break;
+        }
+        return value;
+    }
+
+    const Proof = struct { move: Move, plies: i32 };
+
+    fn prove_fours(self: *Game, attacker: Field, depth: i32) ?Proof {
+        if (depth <= 0 or self.counters.threat_nodes >= 256) return null;
+        self.counters.threat_nodes += 1;
+        if (self.stop()) return null;
+        const tactical = self.tactics(attacker);
+        if (tactical.win) |m| return .{ .move = m, .plies = 1 };
+        if (tactical.opponent_wins >= 2) return null;
+        var backing: [NN]Move = undefined;
+        const moves = self.available_moves(&backing);
+        for (moves) |m| {
+            if (self.stop()) return null;
+            if (tactical.block) |block| {
+                if (!same_move(m, block)) continue;
+            }
+            if (self.threat_at(m, attacker).fours == 0) continue;
+            self.place(m, attacker);
+            const defense = self.tactics(opponent(attacker));
+            var proof: ?Proof = null;
+            if (defense.win == null) {
+                if (defense.opponent_wins >= 2) {
+                    proof = .{ .move = m, .plies = 3 };
+                } else if (defense.block) |block| {
+                    self.place(block, opponent(attacker));
+                    const continuation = self.prove_fours(attacker, depth - 1);
+                    self.unplace(block);
+                    if (continuation) |p| proof = .{ .move = m, .plies = p.plies + 2 };
+                }
+            }
+            self.unplace(m);
+            if (proof != null) return proof;
+        }
+        return null;
     }
 
     pub fn print_board(self: *const Game) void {
@@ -1171,7 +1003,11 @@ pub export fn loopback() void {
     var player: Field = .computer;
     while (true) {
         output("thinking...\n", .{});
-        const move = game.choose_move(DEPTH, player);
+        const move = game.search(.{ .time_ms = 1000, .progress = true }, player).move;
+        if (move.invalid()) {
+            output("draw\n", .{});
+            break;
+        }
         game.place(move, player);
         game.print_board_at(move);
         output("{any}: {any}\n", .{ player, move });
@@ -1189,7 +1025,7 @@ pub export fn loopback() void {
     }
 }
 
-pub const patterns: [16]Pattern = [_]Pattern{
+pub const patterns: [18]Pattern = [_]Pattern{
     Pattern{ .value = "GGGGG", .weight = 10000 },
     Pattern{ .value = "_GGGG_", .weight = 5000 },
     Pattern{ .value = "GGG_G", .weight = 500 },
@@ -1206,6 +1042,8 @@ pub const patterns: [16]Pattern = [_]Pattern{
     Pattern{ .value = "_G_G_", .weight = 5 },
     Pattern{ .value = "_GG", .weight = 1 },
     Pattern{ .value = "GG_", .weight = 1 },
+    Pattern{ .value = "_G__G_", .weight = 5 },
+    Pattern{ .value = "_G_G_G_", .weight = 100 },
 };
 
 const Pattern = struct {
@@ -1248,8 +1086,6 @@ pub fn progress(i: usize, n: usize, move: Move, game: *const Game) void {
         return;
     }
 
-    game.print_board_at(move);
-
     const crlf = if (i == n) "\n" else "\r";
     const percent: f64 = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n)) * 100.0;
 
@@ -1257,7 +1093,7 @@ pub fn progress(i: usize, n: usize, move: Move, game: *const Game) void {
     const fmt = "{any: <.2}% ({any}/{any}) ({d}) [{d} : {d}] {s}";
 
     const stats = game.counters;
-    const args = .{ percent, i, n, stats.analyzed_moves, move.r, move.c, crlf };
+    const args = .{ percent, i, n, stats.nodes, move.r, move.c, crlf };
 
     const v = std.fmt.bufPrint(&buffer, fmt, args) catch return;
     output("{s}", .{v});
@@ -1267,16 +1103,34 @@ pub fn progress(i: usize, n: usize, move: Move, game: *const Game) void {
     }
 }
 
-// Partial selection: keep the top MAX_CANDIDATES by hotness (descending).
-// Simple O(n * MAX_CANDIDATES) scheme is fine at these sizes.
-inline fn swap(a: *Move, b: *Move) void {
-    const tmp = a.*;
-    a.* = b.*;
-    b.* = tmp;
+test "quiescence recognizes forced loss and extends mandatory blocks beyond horizon" {
+    var game = Game.init();
+    game.options.time_ms = 0;
+    for (4..8) |c| game.place(Move.at(7, @intCast(c)), .human);
+    try testing.expectEqual(-WIN + 2, game.quiescence(0, .computer, -WIN * 2, WIN * 2, 0));
+    game.place(Move.at(7, 3), .computer);
+    const hash = game.hash;
+    const score = game.quiescence(0, .computer, -WIN * 2, WIN * 2, 0);
+    game.place(Move.at(7, 8), .computer);
+    try testing.expectEqual(game.evaluate_static(), score);
+    game.unplace(Move.at(7, 8));
+    try testing.expectEqual(hash, game.hash);
 }
 
-inline fn swap_u8(a: *u8, b: *u8) void {
-    const t = a.*;
-    a.* = b.*;
-    b.* = t;
+test "continuous-four proof finds a forcing chain and restores state" {
+    var game = Game.init();
+    game.options.time_ms = 0;
+    for ([_]Move{ Move.at(7, 4), Move.at(7, 5), Move.at(7, 6), Move.at(4, 7), Move.at(5, 7) }) |m| game.place(m, .computer);
+    game.place(Move.at(7, 3), .human);
+    const hash = game.hash;
+    const evaluation = game.evaluation;
+    const proof = game.prove_fours(.computer, 4);
+    try testing.expect(proof != null);
+    try testing.expect(proof.?.plies >= 3 and proof.?.plies <= 9);
+    try testing.expectEqual(hash, game.hash);
+    try testing.expectEqual(evaluation, game.evaluation);
+    try testing.expectEqual(6, game.stack_len);
+    // An opponent's immediate win must not be ignored by a purported proof.
+    for (2..6) |c| game.place(Move.at(0, @intCast(c)), .human);
+    try testing.expect(game.prove_fours(.computer, 4) == null);
 }

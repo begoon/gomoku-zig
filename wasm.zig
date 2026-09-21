@@ -46,7 +46,27 @@ pub export fn choose_move(handle: usize, depth: i32, player: i32) i32 {
     }
     const field = if (player == 1) gomoku.Field.human else gomoku.Field.computer;
     const move = game.choose_move(depth, field);
+    if (move.invalid()) return -1;
     return (move.r << 8) + move.c;
+}
+
+// A negative move means the board is full.
+pub export fn choose_move_timed(handle: usize, time_ms: u32, player: i32) i32 {
+    if (player != 1 and player != 2) @panic("invalid player");
+    const result = castHandle(handle).search(.{
+        .time_ms = @max(1, time_ms),
+        .progress = true,
+    }, if (player == 1) .human else .computer);
+    if (result.move.invalid()) return -1;
+    return (result.move.r << 8) + result.move.c;
+}
+
+pub export fn search_nodes(handle: usize) usize {
+    return castHandle(handle).counters.nodes;
+}
+
+pub export fn search_depth(handle: usize) i32 {
+    return castHandle(handle).counters.completed_depth;
 }
 
 pub export fn is_winner(handle: usize, r: i32, c: i32) i32 {

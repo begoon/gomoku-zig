@@ -7,6 +7,12 @@
         <link rel="stylesheet" href="styles.css" />
     </head>
     <body>
+        <label for="difficulty">Thinking time:</label>
+        <select id="difficulty">
+            <option value="250">Quick (0.25 seconds)</option>
+            <option value="1000" selected>Normal (1 second)</option>
+            <option value="3000">Deep (3 seconds)</option>
+        </select>
         <div id="board" class="board"></div>
         <div id="status"></div>
         <div id="duration"></div>
