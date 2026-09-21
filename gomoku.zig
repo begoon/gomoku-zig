@@ -721,11 +721,11 @@ pub const Game = struct {
         const tactical = self.tactics(player);
         if (tactical.win) |win| return .{ .move = win, .score = mate(player, 1) };
         if (tactical.opponent_wins >= 2) return .{ .move = tactical.block.?, .score = mate(opponent(player), 2) };
+        // There is only one move that avoids an immediate loss. Searching its
+        // continuations cannot change the choice, so return before spending the budget.
+        if (tactical.block) |block| return .{ .move = block, .score = self.evaluate_static() };
         var backing: [NN]Move = undefined;
-        const moves = if (tactical.block) |block| blk: {
-            backing[0] = block;
-            break :blk backing[0..1];
-        } else self.available_moves(&backing);
+        const moves = self.available_moves(&backing);
         self.order_moves(moves, player, Move.at(-1, -1), 0);
         var result: SearchResult = .{ .move = moves[0], .score = self.evaluate_static() };
         if (self.stack_len == 0) return result;

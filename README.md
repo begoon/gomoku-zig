@@ -19,7 +19,7 @@ just wasm-test   # Rebuild and test the WASM API (requires Bun)
 
 The committed `site/wasm.wasm` is the browser deployment artifact. Rebuild it after changing Zig sources. WASM hosts must provide `env.now_ms` using a monotonic clock such as `performance.now()`, alongside the existing console/status callbacks. Builds reserve a 2 MiB stack for search and game state.
 
-The native API is `game.search(options, player)`. It returns a legal fallback if interrupted before depth one, otherwise the best result from the last completed iteration (or a proven tactical win). A full board returns an invalid move. `game.choose_move(depth, player)` retains the depth-limited interface; WASM additionally exports `choose_move_timed(handle, milliseconds, player)`, which returns `-1` on a full board.
+The native API is `game.search(options, player)`. It returns a legal fallback if interrupted before depth one, otherwise the best result from the last completed iteration (or a proven tactical win). Immediate wins and compulsory blocks return without searching: thinking budgets are maximums, and the browser countdown stops as soon as a move is ready. A full board returns an invalid move. `game.choose_move(depth, player)` retains the depth-limited interface; WASM additionally exports `choose_move_timed(handle, milliseconds, player)`, which returns `-1` on a full board.
 
 Search options include `max_depth`, `time_ms` (zero means unlimited), `node_limit`, `use_tt`, `threat_depth`, `profile`, and `progress`. Fine-grained pattern timers are off by default, and progress updates are limited to about 10 per second. Budgets are cooperative: the current node's work may finish slightly after the deadline.
 

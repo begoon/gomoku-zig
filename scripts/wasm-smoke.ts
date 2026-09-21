@@ -65,5 +65,15 @@ assert.equal(await rpc('is_winner', { r: result.move >> 8, c: result.move & 255 
 await rpc('free');
 await rpc('start');
 assert.equal((await rpc('choose_move', { time_ms: 25, player: 2 })).move, (7 << 8) | 7);
+// A semi-open four has exactly one defense; the 30 s budget is only a maximum.
+await rpc('place', { r: 7, c: 3, player: 2 });
+for (let c = 4; c < 8; c++) await rpc('place', { r: 7, c, player: 1 });
+const blockStart = performance.now();
+const block = await rpc('choose_move', { time_ms: 30_000, player: 2 });
+const blockElapsed = performance.now() - blockStart;
+assert.equal(block.move, (7 << 8) | 8);
+assert.equal(block.nodes, 0);
+assert.equal(block.depth, 0);
+assert(blockElapsed < 1000, `Forced block took ${blockElapsed} ms`);
 await rpc('free');
-console.log('Browser worker RPC smoke test passed');
+console.log(`Browser worker RPC smoke test passed; 30 s forced block took ${blockElapsed.toFixed(1)} ms`);

@@ -150,6 +150,25 @@ test "immediate broken-four wins and compulsory blocks in every orientation" {
     }
 }
 
+test "semi-open four blocks return without searching the thinking budget" {
+    for (0..8) |symmetry| {
+        for ([_]gomoku.Field{ .human, .computer }) |player| {
+            const other: gomoku.Field = if (player == .human) .computer else .human;
+            var game = Game.init();
+            game.place(transform(Move.at(7, 3), symmetry), player);
+            for (4..8) |c| game.place(transform(Move.at(7, @intCast(c)), symmetry), other);
+            const before = game.hash;
+            const result = game.search(.{ .time_ms = 30_000, .node_limit = 1 }, player);
+            try testing.expectEqualDeep(transform(Move.at(7, 8), symmetry), result.move);
+            try testing.expect(!result.timed_out);
+            try testing.expectEqual(0, result.completed_depth);
+            try testing.expectEqual(0, game.counters.nodes);
+            try testing.expectEqual(0, game.counters.threat_nodes);
+            try testing.expectEqual(before, game.hash);
+        }
+    }
+}
+
 test "win takes priority over opponent threat and open four is a forced loss" {
     var game = Game.init();
     for (4..8) |c| game.place(Move.at(7, @intCast(c)), .human);
