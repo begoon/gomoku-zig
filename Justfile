@@ -45,4 +45,4 @@ wasm-test: js-build
 
 # Compare against a saved older site/wasm.wasm with equal thinking budgets.
 benchmark baseline milliseconds="100" pairs="2":
-    node scripts/benchmark.mjs "{{baseline}}" {{milliseconds}} {{pairs}}
+    bun scripts/benchmark.ts "{{baseline}}" {{milliseconds}} {{pairs}}

@@ -26,7 +26,7 @@ if (!isMainThread) {
     parentPort.postMessage({ ready: true, timed: Boolean(e.choose_move_timed) });
 } else {
     const baseline = process.argv[2];
-    if (!baseline) throw new Error('Usage: node scripts/benchmark.mjs BASELINE.wasm [milliseconds=100] [opening-pairs=2]');
+    if (!baseline) throw new Error('Usage: bun scripts/benchmark.ts BASELINE.wasm [milliseconds=100] [opening-pairs=2]');
     const budget = Number(process.argv[3] ?? 100);
     const pairs = Number(process.argv[4] ?? 2);
     if (!Number.isInteger(budget) || budget < 1 || !Number.isInteger(pairs) || pairs < 1 || pairs > 3) throw new Error('Use a positive integer budget and 1–3 opening pairs');
